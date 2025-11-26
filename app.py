@@ -25,17 +25,33 @@ st.set_page_config(
 )
 
 # ==========================================
-# 2. CONSTANTES DEL SISTEMA
+# 2. CONSTANTES DEL SISTEMA (SECURE)
 # ==========================================
 
-# Credenciales de Base de Datos
-DB_CONFIG: Dict[str, str] = {
-    "host": "127.0.0.1",
-    "port": "5432",
-    "dbname": "saf_gda_db",
-    "user": "saf_user",
-    "password": "SAF-Key16"
-}
+def get_db_config() -> Dict[str, str]:
+    """
+    Recupera credenciales de variables de entorno.
+    Lanza error si faltan secretos críticos.
+    """
+    try:
+        config = {
+            "host": os.environ["SAF_DB_HOST"],
+            "port": os.environ.get("SAF_DB_PORT", "5432"),
+            "dbname": os.environ["SAF_DB_NAME"],
+            "user": os.environ["SAF_DB_USER"],
+            "password": os.environ["SAF_DB_PASSWORD"]
+        }
+        return config
+    except KeyError as e:
+        logger.critical(f"FALTA VARIABLE DE ENTORNO CRÍTICA: {e}")
+        st.error(f"Error de Seguridad: Falta configuración {e}")
+        st.stop() # Detiene la ejecución para proteger el sistema
+
+# Inicialización segura
+try:
+    DB_CONFIG = get_db_config()
+except Exception:
+    DB_CONFIG = {} # Fallback vacío para evitar crash en importación
 
 # Ruta de trazabilidad del motor
 TRACE_PATH = "/home/jesuslangarica/saf_gda/core_processor.py"
