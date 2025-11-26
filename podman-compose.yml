@@ -4,7 +4,7 @@
 # Approved by: SAF-SYNTH-LEAD
 # ==============================================================================
 
-version: '3.8'
+version: "3.8"
 
 services:
   saf_postgres:
@@ -47,17 +47,23 @@ services:
     # CREDENCIALES (Inyección de Entorno)
     # Las comillas aseguran que YAML no malinterprete caracteres especiales.
     # --------------------------------------------------------------------------
+    # NUEVO: Inyección de variables desde archivo .env
+    # Mapeamos las variables de SAF a las de Postgres
     environment:
-      POSTGRES_USER: "saf_user"
-      POSTGRES_PASSWORD: "SAF-Key16"
-      POSTGRES_DB: "saf_gda_db"
+      POSTGRES_USER: ${SAF_DB_USER}
+      POSTGRES_PASSWORD: ${SAF_DB_PASSWORD}
+      POSTGRES_DB: ${SAF_DB_NAME}
+
+    # Le indicamos a Podman dónde buscar el archivo
+    env_file:
+      - .env
 
     # --------------------------------------------------------------------------
     # OPTIMIZACIÓN DE RENDIMIENTO
     # PostgreSQL requiere memoria compartida significativa para paralelismo.
     # El default de 64mb es insuficiente para cargas de trabajo gubernamentales.
     # --------------------------------------------------------------------------
-    shm_size: '128mb'
+    shm_size: "128mb"
 
     # --------------------------------------------------------------------------
     # VERIFICACIÓN DE ESTADO (Healthcheck)
@@ -65,7 +71,7 @@ services:
     # no solo si el proceso PID 1 está vivo.
     # --------------------------------------------------------------------------
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U saf_user -d saf_gda_db"]
+      test: ["CMD-SHELL", "pg_isready -U ${SAF_DB_USER} -d ${SAF_DB_NAME}"]
       interval: 10s
       timeout: 5s
       retries: 5
