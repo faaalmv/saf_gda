@@ -3,170 +3,159 @@ import psycopg
 import os
 import math
 import logging
+import tempfile
 from typing import Optional, Dict
 
-# ==========================================
-# 1. CONFIGURACIÓN Y LOGGING (AUDITORÍA)
-# ==========================================
+# IMPORTACIÓN DEL MOTOR DE INTELIGENCIA (NUEVO)
+# Importamos la función maestra directamente desde tu script core_processor.py
+from core_processor import document_full_processor
 
-# Configuración de Logging (Estándar SAF para trazabilidad)
+# ==========================================
+# 1. CONFIGURACIÓN Y LOGGING
+# ==========================================
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - [SAF-CORE] - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    format='%(asctime)s - [SAF-WEB] - %(levelname)s - %(message)s',
+    datefmt='%H:%M:%S'
 )
 logger = logging.getLogger(__name__)
 
-# Configuración de la página (Mandatorio: Primera instrucción Streamlit)
-st.set_page_config(
-    page_title="SAF-GDA: Ingesta",
-    page_icon="🛡️",
-    layout="wide"
-)
+st.set_page_config(page_title="SAF-GDA: Ingesta", page_icon="🛡️", layout="wide")
 
 # ==========================================
-# 2. CONSTANTES DEL SISTEMA (SECURE)
+# 2. GESTIÓN DE SECRETOS (SEGURA)
 # ==========================================
-
 def get_db_config() -> Dict[str, str]:
-    """
-    Recupera credenciales de variables de entorno.
-    Lanza error si faltan secretos críticos.
-    """
     try:
-        config = {
-            "host": os.environ["SAF_DB_HOST"],
+        return {
+            "host": "127.0.0.1", # Al usar network host, localhost es correcto
             "port": os.environ.get("SAF_DB_PORT", "5432"),
             "dbname": os.environ["SAF_DB_NAME"],
             "user": os.environ["SAF_DB_USER"],
             "password": os.environ["SAF_DB_PASSWORD"]
         }
-        return config
     except KeyError as e:
-        logger.critical(f"FALTA VARIABLE DE ENTORNO CRÍTICA: {e}")
-        st.error(f"Error de Seguridad: Falta configuración {e}")
-        st.stop() # Detiene la ejecución para proteger el sistema
+        # Fallback seguro: Si no hay .env, no rompemos la app hasta que se intente conectar
+        logger.warning(f"Modo sin credenciales: Falta {e}")
+        return {}
 
-# Inicialización segura
-try:
-    DB_CONFIG = get_db_config()
-except Exception:
-    DB_CONFIG = {} # Fallback vacío para evitar crash en importación
-
-# Ruta de trazabilidad del motor
-TRACE_PATH = "/home/jesuslangarica/saf_gda/core_processor.py"
+DB_CONFIG = get_db_config()
 
 # ==========================================
-# 3. LÓGICA DE NEGOCIO (BACKEND)
+# 3. UTILERÍAS
 # ==========================================
-
-@st.cache_data(ttl=30, show_spinner=False)
 def get_db_status() -> int:
-    """
-    Conecta a PostgreSQL y obtiene el conteo de registros 'raw'.
-    Utiliza Context Managers para garantizar el cierre de conexiones.
-    
-    Returns:
-        int: Número de registros o -1 si hay error de conexión.
-    """
+    if not DB_CONFIG: return -1
     try:
-        # 'with' asegura commit/rollback y cierre automático
         with psycopg.connect(**DB_CONFIG) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT count(*) FROM tbl_entradas_raw;")
-                result = cur.fetchone()
-                count = int(result[0]) if result else 0
-                logger.info(f"DB Status Check: {count} registros.")
-                return count
-                
-    except psycopg.Error as e:
-        logger.error(f"Error Operacional DB: {e}")
-        return -1
+                return int(cur.fetchone()[0])
     except Exception as e:
-        logger.critical(f"Error Sistémico: {e}")
+        logger.error(f"DB Error: {e}")
         return -1
 
 def _format_size(size_bytes: int) -> str:
-    """Convierte bytes a formato legible (KB, MB) dinámicamente."""
     if size_bytes == 0: return "0B"
-    size_name = ("B", "KB", "MB", "GB")
     i = int(math.floor(math.log(size_bytes, 1024)))
     p = math.pow(1024, i)
-    s = round(size_bytes / p, 2)
-    return f"{s} {size_name[i]}"
+    return f"{round(size_bytes / p, 2)} {('B', 'KB', 'MB', 'GB')[i]}"
 
 # ==========================================
-# 4. INTERFAZ DE USUARIO (MAIN)
+# 4. INTERFAZ PRINCIPAL
 # ==========================================
-
 def main():
-    """Ejecución principal de la interfaz Streamlit."""
-    
-    # 1. Encabezado
-    st.title("🛡️ SAF-GDA: Módulo de Ingesta de Documentos (Día 4)")
+    st.title("🛡️ SAF-GDA: Ingesta & Auditoría Forense")
     st.markdown("---")
 
-    # 2. Layout de Columnas (Gap large para mejor estética)
     col_status, col_upload = st.columns([1, 2], gap="large")
 
-    # --- COLUMNA 1: MONITOR DE ESTADO ---
+    # --- PANEL IZQUIERDO: ESTADO ---
     with col_status:
-        db_count = get_db_status()
+        count = get_db_status()
+        status_color = "normal" if count >= 0 else "inverse"
+        status_msg = "Online" if count >= 0 else "Offline"
         
-        if db_count == -1:
-            st.metric(
-                label="ESTADO DE CONCILIACIÓN (BASE DE DATOS)",
-                value="ERROR CRÍTICO",
-                delta="Offline",
-                delta_color="inverse"
-            )
-            st.error("Conexión fallida con 127.0.0.1:5432")
-        else:
-            # Formato con separador de miles para legibilidad
-            st.metric(
-                label="ESTADO DE CONCILIACIÓN (BASE DE DATOS)",
-                value=f"{db_count:,} Registros",
-                delta="Online",
-                delta_color="normal"
-            )
-
-    # --- COLUMNA 2: CARGA DE EVIDENCIA ---
-    with col_upload:
-        st.subheader("Carga de Evidencia Digital")
-        
-        uploaded_file = st.file_uploader(
-            "Seleccionar archivo", 
-            type=['pdf', 'png', 'jpg', 'jpeg'],
-            help="Soporta documentos PDF y evidencia gráfica (JPG/PNG)."
+        st.metric(
+            label="REPOSITORIO SQL (Entradas RAW)",
+            value=f"{count:,} Registros" if count >= 0 else "ERROR CONEXIÓN",
+            delta=status_msg,
+            delta_color=status_color
         )
+        
+        st.info("""
+        **Instrucciones:**
+        1. Suba imagen (.png/.jpg)
+        2. El motor extraerá:
+           - Folio Fiscal (OCR)
+           - Monto Total (OCR)
+           - Código QR (Decodificación)
+        """)
+
+    # --- PANEL DERECHO: PROCESAMIENTO ---
+    with col_upload:
+        st.subheader("Carga y Procesamiento de Evidencia")
+        
+        uploaded_file = st.file_uploader("Evidencia Digital", type=['png', 'jpg', 'jpeg'])
 
         if uploaded_file is not None:
-            # Metadata del archivo
-            file_info_cols = st.columns(2)
-            file_info_cols[0].info(f"**Archivo:** `{uploaded_file.name}`")
-            file_info_cols[1].info(f"**Tamaño:** `{_format_size(uploaded_file.size)}`")
+            c1, c2 = st.columns(2)
+            c1.info(f"📄 **Archivo:** `{uploaded_file.name}`")
+            c2.info(f"📦 **Peso:** `{_format_size(uploaded_file.size)}`")
 
-            # Preview opcional para imágenes (Mejora UX)
-            if uploaded_file.type.startswith('image'):
-                with st.expander("👁️ Vista Previa de Evidencia"):
-                    st.image(uploaded_file, use_column_width=True)
+            # Botón de Ejecución Real
+            if st.button("⚡ EJECUTAR ANÁLISIS FORENSE", type="primary", use_container_width=True):
+                
+                with st.status("Procesando evidencia...", expanded=True) as status:
+                    # 1. Guardar archivo temporalmente
+                    st.write("💾 Persistiendo archivo en contenedor...")
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_file:
+                        tmp_file.write(uploaded_file.getbuffer())
+                        tmp_path = tmp_file.name
+                    
+                    try:
+                        # 2. Invocar al Core Processor (Tu lógica real)
+                        st.write("🧠 Invocando Red Neuronal / Tesseract OCR...")
+                        
+                        # Preparamos el payload que espera tu función
+                        job_payload = {
+                            "job_id": f"WEB_{uploaded_file.name}",
+                            "document_path": tmp_path
+                        }
+                        
+                        # ¡AQUÍ OCURRE LA MAGIA!
+                        result = document_full_processor(job_payload)
+                        
+                        status.update(label="¡Procesamiento Completado!", state="complete", expanded=False)
+                        
+                        # 3. Mostrar Resultados
+                        if result["status"] == "PROCESS_OK":
+                            st.success("✅ Extracción Exitosa")
+                            
+                            # Mostramos los datos extraídos
+                            res_col1, res_col2 = st.columns(2)
+                            with res_col1:
+                                st.caption("Folio Fiscal (OCR Zonal)")
+                                st.code(result.get("ocr_folio_fiscal") or "NO DETECTADO")
+                                
+                                st.caption("Total Factura (OCR Zonal)")
+                                st.code(result.get("ocr_total") or "NO DETECTADO")
+                                
+                            with res_col2:
+                                st.caption("Datos QR")
+                                st.text_area("Decodificación", result.get("qr_data") or "QR ilegible/ausente", height=100)
+                                
+                            with st.expander("🔍 Ver JSON Crudo (Auditoría Técnica)"):
+                                st.json(result)
+                        else:
+                            st.error(f"❌ Fallo en procesamiento: {result.get('error_msg')}")
 
-            # Botón de Acción Principal
-            if st.button("1. Iniciar Conciliación Zonal", type="primary", use_container_width=True):
-                try:
-                    # Mensaje de éxito visual
-                    st.success("✅ Archivo aceptado. Procesamiento iniciado.")
-                    
-                    # Log de trazabilidad técnica (Requerimiento Crítico)
-                    st.code(
-                        f"Motor Asíncrono iniciado.\nTrazabilidad: {TRACE_PATH}", 
-                        language="bash"
-                    )
-                    logger.info(f"Ingesta iniciada para archivo: {uploaded_file.name}")
-                    
-                except Exception as e:
-                    st.error(f"Error al invocar el motor: {e}")
-                    logger.error(f"Fallo en botón de ingesta: {e}")
+                    except Exception as e:
+                        st.error(f"Error Crítico en Runtime: {e}")
+                    finally:
+                        # Limpieza
+                        if os.path.exists(tmp_path):
+                            os.remove(tmp_path)
 
 if __name__ == "__main__":
     main()
