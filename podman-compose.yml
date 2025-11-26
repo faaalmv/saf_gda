@@ -1,0 +1,72 @@
+# ==============================================================================
+# SAF-GDA DATABASE ORCHESTRATION LAYER
+# Golden Master Version: 1.0.0
+# Approved by: SAF-SYNTH-LEAD
+# ==============================================================================
+
+version: '3.8'
+
+services:
+  saf_postgres:
+    # --------------------------------------------------------------------------
+    # IMAGEN Y IDENTIDAD
+    # Usamos la versión 16 fija para garantizar inmutabilidad en producción.
+    # --------------------------------------------------------------------------
+    image: docker.io/library/postgres:16
+    container_name: saf_postgres
+    restart: unless-stopped
+
+    # --------------------------------------------------------------------------
+    # SEGURIDAD DE RED (Air-Gap Lógico)
+    # El puerto 5432 se vincula EXCLUSIVAMENTE a la interfaz loopback (127.0.0.1).
+    # Esto actúa como un firewall a nivel de socket; ninguna conexión externa
+    # puede alcanzar la base de datos directamente.
+    # --------------------------------------------------------------------------
+    ports:
+      - "127.0.0.1:5432:5432"
+
+    # --------------------------------------------------------------------------
+    # PERSISTENCIA Y SELINUX
+    # Mapeo: Host (~) -> Contenedor (/var/lib/postgresql/data)
+    # Flag :Z -> CRÍTICO. Indica a Podman que re-etiquete el contenido del
+    # directorio del host con el contexto de seguridad SELinux privado del
+    # contenedor. Sin esto, la base de datos fallará en entornos RHEL/Fedora.
+    # --------------------------------------------------------------------------
+    volumes:
+      - "~/saf_gda/data:/var/lib/postgresql/data:Z"
+
+    # --------------------------------------------------------------------------
+    # HARDENING (Endurecimiento)
+    # Impide que los procesos dentro del contenedor ganen nuevos privilegios
+    # durante la ejecución (ej: vía setuid/setgid).
+    # --------------------------------------------------------------------------
+    security_opt:
+      - no-new-privileges:true
+
+    # --------------------------------------------------------------------------
+    # CREDENCIALES (Inyección de Entorno)
+    # Las comillas aseguran que YAML no malinterprete caracteres especiales.
+    # --------------------------------------------------------------------------
+    environment:
+      POSTGRES_USER: "saf_user"
+      POSTGRES_PASSWORD: "SAF-Key16"
+      POSTGRES_DB: "saf_gda_db"
+
+    # --------------------------------------------------------------------------
+    # OPTIMIZACIÓN DE RENDIMIENTO
+    # PostgreSQL requiere memoria compartida significativa para paralelismo.
+    # El default de 64mb es insuficiente para cargas de trabajo gubernamentales.
+    # --------------------------------------------------------------------------
+    shm_size: '128mb'
+
+    # --------------------------------------------------------------------------
+    # VERIFICACIÓN DE ESTADO (Healthcheck)
+    # Permite a Podman saber si la DB está realmente aceptando conexiones,
+    # no solo si el proceso PID 1 está vivo.
+    # --------------------------------------------------------------------------
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U saf_user -d saf_gda_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
