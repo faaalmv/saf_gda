@@ -1,127 +1,110 @@
 """
-CORE_PROCESSOR.PY (Versión Smart Regex - Flexible)
+CORE_PROCESSOR.PY (Versión Definitiva - Solo Extracción)
 -------------------------------------------------------
-AUTOR: SAF-SYNTH-LEAD
-ARQUITECTURA: Python 3.12 (AsyncIO + Multiprocessing)
-DESCRIPCIÓN: Reemplaza coordenadas fijas por búsqueda de patrones (Regex).
+OBJETIVO:
+Extraer 5 datos clave usando Regex sobre imágenes pre-procesadas.
+Sin validaciones de negocio. Solo datos.
 """
 
-import asyncio
-import concurrent.futures
 import logging
-import os
-import sys
+import re
 import time
-import re  # IMPORTANTE: Para expresiones regulares
-from typing import List, Dict, Any, Final, Tuple, Optional
+from typing import Dict, Any, Optional
 import cv2
 import numpy as np
 import pytesseract
 from PIL import Image
-from pyzbar import pyzbar
-from pathlib import Path
 
-# --- CONFIGURACIÓN ESTRATÉGICA ---
-MAX_CPU_WORKERS: Final[int] = 4
-TIMEOUT_IO_SEC: Final[float] = 10.0
-TIMEOUT_CPU_TASK_SEC: Final[float] = 20.0 # Aumentado para lectura completa
-TESS_CONFIG: str = "--psm 3 -l spa" # PSM 3: Auto page segmentation (lee todo)
+# --- CONFIGURACIÓN ---
+TESS_CONFIG: str = "--psm 3 -l spa"
 
-# Regex para Folio Fiscal (UUID v4 estándar del SAT)
-REGEX_UUID = r'[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}'
+# --- PATRONES DE EXTRACCIÓN ---
+PATTERNS = {
+    # 1. UUID (Folio Fiscal)
+    "UUID": r'[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}',
+    
+    # 2. RFC Emisor (Cualquier RFC con estructura válida)
+    "RFC_EMISOR": r'[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}',
+    
+    # 3. Orden de Compra (OC/XX/XXXX)
+    "ORDEN_COMPRA": r'(?:OC|ORDEN\s+DE\s+COMPRA|PEDIDO|N°\s+DE\s+ORDEN)[^\d]*(\d{2}[/.-]\d+)',
+    
+    # 4. Fecha (ISO o MX)
+    "FECHA": r'(\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})',
+    
+    # 5. Total (Moneda)
+    "TOTAL": r'(?:Total|TOTAL|Neto|Pagar|Importe|Gran Total)[^0-9\n]*\$?\s*([\d,]+\.\d{2})'
+}
 
-# Regex para detectar montos (Busca formato $ 1,234.56 o 1234.56 cerca de la palabra Total)
-REGEX_TOTAL = r'(?:Total|TOTAL|Neto)[\s:.$]*([\d,]+\.\d{2})'
-
-# --- LOGGING FORENSE ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s | PID:%(process)-5d | %(levelname)-7s | %(message)s',
-    datefmt='%H:%M:%S'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("SAF_CORE")
 
-# ==============================================================================
-# LÓGICA DE NEGOCIO (CPU BOUND)
-# ==============================================================================
+def _preprocess_heavy_duty(image_path: str) -> np.ndarray:
+    """ Limpieza: Zoom 2.5x + Umbral Adaptativo. """
+    img = cv2.imread(image_path)
+    if img is None: raise ValueError("Error leyendo imagen")
 
-def _preprocess_image(image: np.ndarray) -> np.ndarray:
-    """ Pre-procesamiento para mejorar contraste de texto. """
-    if len(image.shape) == 3:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = image
-    
-    # Binarización simple suele funcionar mejor para texto completo que adaptativa agresiva
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.resize(gray, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
+    binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 5)
     return binary
 
+def _clean_amount(amount_str: str) -> Optional[float]:
+    """ Limpia formato moneda. """
+    try:
+        return float(re.sub(r'[^\d.]', '', amount_str.replace(',', '')))
+    except:
+        return None
+
 def document_full_processor(job_data: Dict[str, Any]) -> Dict[str, Any]:
-    """ Procesador que lee TODO el documento y busca patrones. """
-    start_time = time.perf_counter()
-    worker_pid = os.getpid()
-    
-    response: Dict[str, Any] = {
-        "status": "PROCESS_FAIL", "ocr_total": None, "ocr_folio_fiscal": None,
-        "qr_data": None, "time_total": 0.0, "error_msg": None, 
-        "job_id": job_data.get("job_id"),
-        "worker_pid": worker_pid,
-        "full_text_debug": "" # Para ver qué leyó realmente
+    response = {
+        "status": "PROCESS_FAIL",
+        "ocr_folio_fiscal": None,
+        "ocr_total": None,
+        "rfc_emisor": None,
+        "orden_compra": None,
+        "fecha_emision": None,
+        "error_msg": None
     }
 
     try:
-        document_path = job_data.get('document_path')
-        if not os.path.exists(document_path): 
-            raise FileNotFoundError(f"Archivo no encontrado: {document_path}")
-
-        # 1. Carga OpenCV
-        cv_img = cv2.imread(document_path)
-        processed_bin = _preprocess_image(cv_img)
-
-        # 2. Extracción QR (Igual que antes, funciona bien)
-        barcodes = pyzbar.decode(cv_img)
-        qr_candidates = [b.data.decode("utf-8") for b in barcodes if b.data]
-        response["qr_data"] = qr_candidates[0] if qr_candidates else None
-
-        # 3. OCR DE PÁGINA COMPLETA (El cambio clave)
-        pil_img = Image.fromarray(processed_bin)
-        full_text = pytesseract.image_to_string(pil_img, config=TESS_CONFIG)
-        response["full_text_debug"] = full_text[:200] + "..." # Guardamos un snippet
-
-        # 4. INTELIGENCIA DE PATRONES (REGEX)
+        doc_path = job_data.get('document_path')
         
-        # A. Buscar UUID (Folio Fiscal)
-        uuid_match = re.search(REGEX_UUID, full_text)
-        if uuid_match:
-            response["ocr_folio_fiscal"] = uuid_match.group(0)
-        else:
-            # Fallback: Si no lo encuentra en el texto, intentar extraer del QR si existe
-            if response["qr_data"] and "id=" in response["qr_data"]:
-                try:
-                    # Extraer id=UUID del string del QR del SAT
-                    match_qr = re.search(r'id=([a-fA-F0-9-]{36})', response["qr_data"])
-                    if match_qr:
-                        response["ocr_folio_fiscal"] = match_qr.group(1) + " (Vía QR)"
-                except:
-                    pass
+        # 1. OCR
+        processed_img = _preprocess_heavy_duty(doc_path)
+        full_text = pytesseract.image_to_string(Image.fromarray(processed_img), config=TESS_CONFIG)
 
-        # B. Buscar Total
-        # Buscamos patrones de dinero. Esto es más heurístico.
-        total_match = re.search(REGEX_TOTAL, full_text)
-        if total_match:
-            response["ocr_total"] = total_match.group(1)
+        # 2. Extracción Regex
         
+        # UUID
+        match_uuid = re.search(PATTERNS["UUID"], full_text, re.IGNORECASE)
+        if match_uuid: 
+            response["ocr_folio_fiscal"] = match_uuid.group(0).upper()
+
+        # Total (Última coincidencia)
+        matches_total = re.findall(PATTERNS["TOTAL"], full_text, re.IGNORECASE)
+        if matches_total:
+            response["ocr_total"] = str(_clean_amount(matches_total[-1]))
+
+        # Orden de Compra
+        match_oc = re.search(PATTERNS["ORDEN_COMPRA"], full_text, re.IGNORECASE)
+        if match_oc:
+            response["orden_compra"] = match_oc.group(1)
+
+        # Fecha
+        match_fecha = re.search(PATTERNS["FECHA"], full_text)
+        if match_fecha:
+            response["fecha_emision"] = match_fecha.group(1)
+
+        # RFC Emisor (Tomamos el primero que encuentre)
+        match_rfc = re.search(PATTERNS["RFC_EMISOR"], full_text)
+        if match_rfc:
+            response["rfc_emisor"] = match_rfc.group(0)
+
         response["status"] = "PROCESS_OK"
 
     except Exception as e:
-        logger.error(f"Error crítico: {str(e)}")
-        response["status"] = "PROCESS_FAIL"
         response["error_msg"] = str(e)
+        logger.error(f"Error OCR: {e}")
 
-    finally:
-        end_time = time.perf_counter()
-        response["time_total"] = round(end_time - start_time, 4)
-        
     return response
-
-# ... (El resto del código boilerplate main/asyncio se queda igual) ...
